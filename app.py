@@ -450,8 +450,17 @@ class _DbWrapper:
 def get_db():
     """Return a wrapped psycopg2 connection."""
     url = st.secrets["database_url"]
-    conn = psycopg2.connect(url)
-    return _DbWrapper(conn)
+    # Supabase requires SSL and a connect timeout
+    if "sslmode" not in url:
+        sep = "&" if "?" in url else "?"
+        url += f"{sep}sslmode=require"
+    try:
+        conn = psycopg2.connect(url, connect_timeout=15)
+        return _DbWrapper(conn)
+    except Exception as e:
+        host = url.split("@")[1].split("/")[0] if "@" in url else "unknown"
+        st.error(f"**Database connection error:** `{e}`\n\n**Host attempted:** `{host}`")
+        raise
 
 def init_db():
     """Ensure all tables exist (safe to run on every startup)."""
