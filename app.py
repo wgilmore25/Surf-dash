@@ -429,8 +429,8 @@ class _DbWrapper:
         self._conn = conn
 
     def execute(self, sql, params=None):
-        cur = self._conn.cursor()
-            cur.execute(sql) if params is None else cur.execute(sql, params)
+        cur = self._conn.cursor() 
+        cur.execute(sql) if params is None else cur.execute(sql, params)
         return cur
 
     def cursor(self):
