@@ -430,7 +430,7 @@ class _DbWrapper:
 
     def execute(self, sql, params=None):
         cur = self._conn.cursor()
-        cur.execute(sql, params or ())
+        
         return cur
 
     def cursor(self):
@@ -775,7 +775,7 @@ def page_overview():
             FROM athletes a
             LEFT JOIN ranking_history rh ON rh.athlete_id=a.id AND rh.season='2026'
             LEFT JOIN comp_results cr ON cr.athlete_id=a.id AND cr.season='2026'
-            WHERE a.tour LIKE '%CT%' AND a.gender=%s
+            WHERE a.tour LIKE '%%CT%%' AND a.gender=%s
             GROUP BY a.id
             ORDER BY rh.ranking ASC NULLS LAST, a.name ASC
         """, (gender_val,)).fetchall()
