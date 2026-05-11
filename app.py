@@ -429,7 +429,7 @@ class _DbWrapper:
         self._conn = conn
 
     def execute(self, sql, params=None):
-        cur = self._conn.cursor() 
+        cur = self._conn.cursor()
         _ = cur.execute(sql) if params is None else cur.execute(sql, params)
         return cur
 
@@ -450,17 +450,11 @@ class _DbWrapper:
 def get_db():
     """Return a wrapped psycopg2 connection."""
     url = st.secrets["database_url"]
-    # Supabase requires SSL and a connect timeout
+    # Supabase requires SSL; append sslmode if not already present
     if "sslmode" not in url:
-        sep = "&" if "?" in url else "?"
-        url += f"{sep}sslmode=require"
-    try:
-        conn = psycopg2.connect(url, connect_timeout=15)
-        return _DbWrapper(conn)
-    except Exception as e:
-        host = url.split("@")[1].split("/")[0] if "@" in url else "unknown"
-        st.error(f"**Database connection error:** `{e}`\n\n**Host attempted:** `{host}`")
-        raise
+        url += "?sslmode=require"
+    conn = psycopg2.connect(url)
+    return _DbWrapper(conn)
 
 def init_db():
     """Ensure all tables exist (safe to run on every startup)."""
@@ -1296,7 +1290,174 @@ def page_sync():
                 return aid, aname
         return None, None
 
-    tab_rank, tab_event = st.tabs(["Season Rankings", "Event Results"])
+    def fetch_wsl_event_placings(event_url):
+        """Scrape a WSL event 'prizes' page and return placings + post-event standings.
+
+        Returns dict like:
+          {
+            "event_name": str, "event_date": str,
+            "Men":   [{name, country, place, event_points, season_rank, season_points}, ...],
+            "Women": [{...}],
+          }
+        """
+        import requests, re as _re
+        from bs4 import BeautifulSoup
+        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/124.0.0.0 Safari/537.36")
+        r = requests.get(event_url, headers={"User-Agent": ua}, timeout=30)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        event_name = ""
+        h1 = soup.select_one("h1, .event-title, .event-name")
+        if h1:
+            event_name = h1.get_text(strip=True)
+
+        out = {"event_name": event_name, "Men": [], "Women": []}
+
+        def _txt(el, sel):
+            x = el.select_one(sel)
+            return x.get_text(strip=True) if x else ""
+
+        def _intish(s):
+            s = s.replace(",", "").strip()
+            m = _re.match(r"[-+]?\d+", s)
+            return int(m.group(0)) if m else None
+
+        for tour in soup.select(".joint-event-prizes__tour"):
+            name_el = tour.select_one(".joint-event-prizes__tour-name")
+            if not name_el:
+                continue
+            tour_name = name_el.get_text(strip=True)
+            gender = "Men" if "Men" in tour_name else ("Women" if "Women" in tour_name else None)
+            if not gender:
+                continue
+
+            for wrap in tour.select(".results-prizes-athlete-wrap"):
+                place_text = _txt(wrap, ".place")
+                if place_text == "Champion":
+                    place_num = 1
+                else:
+                    m = _re.match(r"(\d+)", place_text)
+                    place_num = int(m.group(1)) if m else None
+
+                aname = _txt(wrap, ".athlete-name")
+                if not aname:
+                    continue
+                country = _txt(wrap, ".home")
+
+                out[gender].append({
+                    "name":          aname,
+                    "country":       country,
+                    "place":         place_num,
+                    "event_points":  _intish(_txt(wrap, ".stat-points strong")),
+                    "season_rank":   _intish(_txt(wrap, ".stat-rank strong")),
+                    "season_points": _intish(_txt(wrap, ".stat-season-points strong")),
+                })
+        return out
+
+    GOLD_COAST_URL = "https://www.worldsurfleague.com/events/2026/ct/438/bonsoy-gold-coast-pro/prizes"
+    GOLD_COAST_EVENT_NAME = "Bonsoy Gold Coast Pro"
+    GOLD_COAST_EVENT_DATE = "2026-05-11"  # event window May 1-11
+
+    tab_auto, tab_rank, tab_event = st.tabs(["🌊 Gold Coast (Auto)", "Season Rankings", "Event Results"])
+
+    # ── Tab 0: Gold Coast Auto-Import ─────────────────────────────────────────
+    with tab_auto:
+        st.markdown("#### Auto-Import: Bonsoy Gold Coast Pro 2026")
+        st.markdown(
+            f"Pull placings and post-event standings (Men + Women CT) directly from "
+            f"[WSL]({GOLD_COAST_URL}).")
+
+        if st.button("⚡ Pull Latest from WSL", type="primary", key="gc_fetch"):
+            with st.spinner("Fetching from worldsurfleague.com…"):
+                try:
+                    data = fetch_wsl_event_placings(GOLD_COAST_URL)
+                except Exception as e:
+                    st.error(f"Couldn't fetch WSL page: {e}")
+                    data = None
+            if data:
+                con = get_db()
+                all_athletes = con.execute("SELECT id, name FROM athletes").fetchall()
+                con.close()
+                preview = {"Men": [], "Women": []}
+                for gender in ("Men", "Women"):
+                    for row in data[gender]:
+                        aid_m, aname_m = match_athlete(row["name"], all_athletes)
+                        preview[gender].append({**row,
+                            "matched_id": aid_m,
+                            "matched_name": aname_m or "⚠ No match"})
+                st.session_state["gc_preview"] = {
+                    "event_name": GOLD_COAST_EVENT_NAME,
+                    "event_date": GOLD_COAST_EVENT_DATE,
+                    "men":   preview["Men"],
+                    "women": preview["Women"],
+                }
+
+        if st.session_state.get("gc_preview"):
+            gc = st.session_state["gc_preview"]
+            for label, rows in (("Men's CT", gc["men"]), ("Women's CT", gc["women"])):
+                if not rows:
+                    continue
+                st.markdown(f"**{label}** — {len(rows)} athletes")
+                df = pd.DataFrame([{
+                    "Place":         p["place"],
+                    "WSL Name":      p["name"],
+                    "Matched":       p["matched_name"],
+                    "Event Pts":     p["event_points"],
+                    "New Rank":      p["season_rank"],
+                    "Season Pts":    p["season_points"],
+                } for p in rows])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+            matched_total = sum(1 for g in ("men","women") for p in gc[g] if p["matched_id"])
+            total = len(gc["men"]) + len(gc["women"])
+            st.info(f"{matched_total} of {total} athletes matched to roster.")
+
+            if st.button("✓ Import to Database", type="primary", key="gc_import"):
+                con = get_db()
+                imp_results = 0
+                imp_rankings = 0
+                for gender_label, rows in (("Men's CT", gc["men"]), ("Women's CT", gc["women"])):
+                    for p in rows:
+                        if not p["matched_id"]:
+                            continue
+                        # Upsert competition result for this event
+                        con.execute(
+                            """DELETE FROM comp_results
+                               WHERE athlete_id=%s AND season=%s AND event=%s""",
+                            (p["matched_id"], "2026", gc["event_name"]))
+                        con.execute(
+                            """INSERT INTO comp_results
+                               (athlete_id, season, event, tour, event_date,
+                                location, round, place, points, notes, source_url)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (p["matched_id"], "2026", gc["event_name"], gender_label,
+                             gc["event_date"], "Gold Coast, Australia", "",
+                             p["place"], p["event_points"],
+                             f"Auto-imported from WSL {gc['event_date']}",
+                             GOLD_COAST_URL))
+                        imp_results += 1
+
+                        # Upsert post-event season standing
+                        if p["season_rank"] is not None:
+                            con.execute(
+                                """DELETE FROM ranking_history
+                                   WHERE athlete_id=%s AND season=%s AND as_of=%s""",
+                                (p["matched_id"], "2026", gc["event_date"]))
+                            con.execute(
+                                """INSERT INTO ranking_history
+                                   (athlete_id, season, tour, as_of, ranking, points, notes)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                                (p["matched_id"], "2026", gender_label,
+                                 gc["event_date"], p["season_rank"], p["season_points"],
+                                 f"Post Gold Coast Pro {gc['event_date']}"))
+                            imp_rankings += 1
+                con.commit(); con.close()
+                st.success(f"✓ Imported {imp_results} event results and {imp_rankings} season standings.")
+                st.session_state["gc_preview"] = None
+                st.rerun()
 
     # ── Tab 1: Season Rankings ────────────────────────────────────────────────
     with tab_rank:
