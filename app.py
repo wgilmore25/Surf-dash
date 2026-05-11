@@ -776,7 +776,7 @@ def page_overview():
             LEFT JOIN ranking_history rh ON rh.athlete_id=a.id AND rh.season='2026'
             LEFT JOIN comp_results cr ON cr.athlete_id=a.id AND cr.season='2026'
             WHERE a.tour LIKE '%%CT%%' AND a.gender=%s
-            GROUP BY a.id
+            GROUP BY a.id, a.name, a.country, rh.ranking, rh.points
             ORDER BY rh.ranking ASC NULLS LAST, a.name ASC
         """, (gender_val,)).fetchall()
         if not rows:
